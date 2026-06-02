@@ -56,6 +56,10 @@ UPI_BANKS = {
     "okdcb": {"bank": "DCB Bank", "ifsc": "DCBL0001234", "type": "Private Sector"},
     "okesaf": {"bank": "ESAF Small Finance Bank", "ifsc": "ESAF0001234", "type": "Small Finance"},
     "okujjivan": {"bank": "Ujjivan Small Finance Bank", "ifsc": "UJVN0001234", "type": "Small Finance"},
+    
+    # 🏣 India Post
+    "okippb": {"bank": "India Post Payments Bank", "ifsc": "IPOS0000001", "type": "Payments Bank"},
+    "ippb": {"bank": "India Post Payments Bank", "ifsc": "IPOS0000001", "type": "Payments Bank"},
 }
 
 # ============================================
@@ -77,7 +81,7 @@ def get_real_ifsc_details(ifsc_code):
                 "district": data.get("DISTRICT", "N/A"),
                 "state": data.get("STATE", "N/A"),
                 "contact": data.get("CONTACT", "N/A"),
-                "micr": data.get("MICR", "N/A"),
+                "micr": data.get("MICR", None),
                 "rtgs": data.get("RTGS", True),
                 "neft": data.get("NEFT", True),
                 "imps": data.get("IMPS", True),
@@ -94,27 +98,39 @@ def get_real_ifsc_details(ifsc_code):
         "address": "N/A",
         "city": "N/A",
         "state": "N/A",
-        "micr": "N/A",
+        "micr": None,
         "upi": True
     }
 
-def verify_upi_name(upi_id):
-    """Verify UPI name via PhonePe API"""
+def verify_upi_amazon(upi_id):
+    """Verify UPI via Amazon Pay API"""
     try:
-        url = "https://api.phonepe.com/apis/identity/v1/validate-upi-id"
+        url = "https://apayapi.amazon.in/v2/bank-offers/getUPIInfo"
         headers = {
-            'User-Agent': 'Mozilla/5.0',
+            'User-Agent': 'Mozilla/5.0 (Linux; Android 13; SM-S908E) AppleWebKit/537.36',
             'Content-Type': 'application/json',
-            'Accept': 'application/json'
+            'Accept': 'application/json',
+            'Origin': 'https://www.amazon.in',
+            'Referer': 'https://www.amazon.in/'
         }
-        data = {"upiId": upi_id, "type": "VALIDATE"}
+        data = {"vpa": upi_id}
         resp = requests.post(url, headers=headers, json=data, timeout=10)
         
         if resp.status_code == 200:
             result = resp.json()
-            if result.get("success") or result.get("valid"):
-                info = result.get("data", {})
-                return info.get("accountHolderName") or info.get("merchantName")
+            if result.get("validVpa"):
+                return {
+                    "name": result.get("recipientBankAccountName"),
+                    "valid": result.get("validVpa", False),
+                    "account_type": result.get("accountType", "UNKNOWN"),
+                    "merchant": result.get("isMerchant", False),
+                    "merchant_verified": result.get("isMerchantVerified", False),
+                    "denied_account_types": result.get("deniedAccountTypes", []),
+                    "violations": result.get("violations", []),
+                    "bank": result.get("bankNameStringId", "").replace("upi_bank_", ""),
+                    "bank_id": result.get("bankNameStringId", ""),
+                    "raw_response": result
+                }
     except:
         pass
     return None
@@ -123,7 +139,7 @@ def verify_upi_name(upi_id):
 # MAIN UPI FUNCTION
 # ============================================
 def get_full_upi_info(upi_id):
-    """Get COMPLETE UPI information"""
+    """Get COMPLETE UPI information with Amazon Pay API"""
     upi_id = upi_id.strip().lower()
     
     # Validate format
@@ -138,45 +154,53 @@ def get_full_upi_info(upi_id):
     username = parts[0]
     handle = parts[1]
     
-    # Get bank info
+    # Get bank info from our database
     bank_info = UPI_BANKS.get(handle, None)
     
-    if not bank_info:
+    # Get real details from Amazon Pay
+    amazon_info = verify_upi_amazon(upi_id)
+    
+    if not amazon_info:
         return {
             "status": "error",
-            "message": f"Unknown UPI handle: @{handle}",
+            "message": f"Could not verify UPI ID: {upi_id}",
             "developer": "@BRONX_ULTRA"
         }
     
-    # Get real IFSC details
-    ifsc_code = bank_info["ifsc"]
+    # Get IFSC details
+    ifsc_code = bank_info["ifsc"] if bank_info else amazon_info.get("bank", "UNKNOWN")
     ifsc_details = get_real_ifsc_details(ifsc_code)
     
-    # Get name from PhonePe
-    name = verify_upi_name(upi_id)
-    
-    # Build response
+    # Build enhanced response
     result = {
         "status": "success",
         "developer": "@BRONX_ULTRA",
-        "powered_by": "BRONX UPI API",
+        "powered_by": "BRONX ULTRA UPI API",
         
-        # UPI Info
-        "name": name if name else " ",
+        # Basic UPI Info
+        "name": amazon_info.get("name", " "),
         "upi_id": upi_id,
         "username": username,
         "handle": f"@{handle}",
-        
-        # Bank Info
-        "bank": bank_info["bank"],
-        "bank_type": bank_info["type"],
-        
-        # IFSC Details (REAL)
-        "ifsc_details": ifsc_details,
+        "valid": amazon_info.get("valid", False),
         
         # Account Info
-        "name": name if name else "Name Protected (RBI Privacy)",
-        "verification": "PhonePe API Verified" if name else "RBI Protected",
+        "account_type": amazon_info.get("account_type", "UNKNOWN"),
+        "merchant": amazon_info.get("merchant", False),
+        "merchant_verified": amazon_info.get("merchant_verified", False),
+        "denied_account_types": amazon_info.get("denied_account_types", []),
+        "violations": amazon_info.get("violations", []),
+        
+        # Bank Info
+        "bank": bank_info["bank"] if bank_info else amazon_info.get("bank", "Unknown"),
+        "bank_id": amazon_info.get("bank_id", ""),
+        "bank_type": bank_info["type"] if bank_info else "Unknown",
+        
+        # IFSC Details
+        "ifsc_details": ifsc_details,
+        
+        # Raw response for debugging
+        "raw_amazon_response": amazon_info.get("raw_response", {})
     }
     
     return result
@@ -188,11 +212,13 @@ def get_full_upi_info(upi_id):
 def home():
     return jsonify({
         "service": "🏦 BRONX ULTRA UPI API",
-        "version": "4.0",
+        "version": "5.0",
         "features": [
-            "✅ 100% Accurate Bank Detection",
+            "✅ Amazon Pay API Integration",
+            "✅ Real Account Holder Name",
+            "✅ Account Type Detection",
+            "✅ Merchant Verification",
             "✅ Real IFSC Details (Razorpay API)",
-            "✅ PhonePe Name Verification",
             "✅ 50+ Indian Banks Supported",
             "✅ Branch, MICR, Contact Info"
         ],
@@ -201,10 +227,10 @@ def home():
             "ifsc": "/api/ifsc?ifsc=SBIN0001234"
         },
         "examples": [
-            "/api/upi?upi=amitdasadhikary@fam",
+            "/api/upi?upi=popl@axl",
             "/api/upi?upi=user@okhdfcbank",
             "/api/upi?upi=merchant@paytm",
-            "/api/ifsc?ifsc=SBIN0001234"
+            "/api/ifsc?ifsc=IPOS0000001"
         ],
         "developer": "@BRONX_ULTRA"
     })
